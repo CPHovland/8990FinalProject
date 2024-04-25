@@ -1,0 +1,1301 @@
+---
+title: "Majewska2019_ResidentOnly"
+author: "Charlotte Hovland"
+date: "2024-04-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(deSolve)
+library(magrittr)
+library(patchwork)
+library(DiceDesign)
+library(reshape2)
+library(ppcor)
+```
+
+Replicating a model of infection in larvae, adults, and milkweed in a fully resident population, as described in Majewska et al., 2019 doi: https://royalsocietypublishing.org/doi/10.1098/rspb.2019.1630. Code modified from https://github.com/Majewska/Majewska_et_al2019_MonarchOEmodel
+
+```{r ODE function - no migrant transmission}
+#defining a system of ODEs for a simplified patch model where migrants are and remain disease free
+
+simplePatchModel <- function(time, y, params) {
+  
+  if (time > tau_e) Lag1 =lagvalue(time-tau_e) else Lag1 = y0 # time lag due to egg stage
+  if (time > tau_p) Lag2 =lagvalue(time-tau_p) else Lag2 = y0 # time lag due to pupa stage
+  
+  # Initializing state variables
+  S_L = y[1] # susceptible larvae
+  I_V = y[2] # infected larvae via vertical transmission
+  I_E = y[3] # infected larvae via environmental transmission
+  I_H = y[4] # infected larvae via adult transfer transmission
+  S_A = y[5] # susceptible adults
+  I_A = y[6] # infected adults
+  C_A = y[7] # contaminated adults
+  S_Am = y[8] # susceptible adult migrants
+  S_Lm = y[9] #susceptible migrant larvae 
+  Dm = y[10] # migrants that have departed the patch
+  M = y[11] # milkweed
+  MC = y[12] # contaminated milkweed
+  
+   #define ODEs
+  
+  with(as.list(params),
+       {
+         # Total number of larvae:
+         Ltot = sum(c(S_L, I_V, I_E, I_H)) 
+         # Total number of adults:
+         Atot = sum(c(S_A, I_A, C_A, S_Am))
+         
+         #Lagged state variables
+         #Lag 1 (egg stage)
+           SA_laggedE = Lag1[5] # susceptible adults
+           IA_laggedE = Lag1[6] # infected adults
+           CA_laggedE = Lag1[7] # contaminated adults
+           SAm_laggedE = Lag1[8] #migrant adults
+           
+          #Lag 2 (pupa stage)
+           SL_laggedP = Lag2[1] # susceptible larvae about to pupate
+           IV_laggedP = Lag2[2] # infected larvae via vertical transmission about to pupate
+           IE_laggedP = Lag2[3] # infected larvae via environmental transmission about to pupate
+           IH_laggedP = Lag2[4] # infected larvae via adult transfer transmission about to pupate
+           SLm_laggedP = Lag2[9] # susceptible larvae of migrants about to pupate
+           
+         # Susceptible larvae:
+         dS_L = b_s*SA_laggedE + b_s*(1-p_h)*CA_laggedE + b_i*(1-p_v)*IA_laggedE - g*S_L - (mu_0+mu_d*Ltot/M)*S_L - (c*MC*S_L/M)
+         
+         # Infected larvae via vertical transmission
+         dI_V = b_i*p_v*IA_laggedE - g*I_V - (mu_0+mu_d*Ltot/M)*I_V
+         
+         # Infected larvae via environmental transmission
+         dI_E = c*MC*S_L/M - (mu_0+mu_d*(Ltot)/M)*I_E -g*I_E
+         
+         # Infected larvae via adult transfer transmission
+         dI_H = b_s*p_h*CA_laggedE - (mu_0+mu_d*(Ltot)/M)*I_H -g*I_H
+         
+         # Susceptible adults
+         dS_A = g*SL_laggedP*rho - mu_S*S_A - delta*(S_A)*(I_A/Atot) + mu_C*C_A
+         
+         # Infected adults
+         dI_A = theta*g*(IV_laggedP+IE_laggedP+IH_laggedP)*rho-mu_I*I_A
+         
+         # Contaminated adults due to adult transfer
+         dC_A = delta*(S_A)*(I_A/Atot) - mu_S*C_A - mu_C*C_A
+         
+         # Migrant adults in patch
+         dS_Am = alpha + g*SLm_laggedP - mu_S*S_Am - gamma*S_Am
+         
+         # Migrant larvae in patch
+         dS_Lm = b_s*SAm_laggedE - g*S_Lm
+         # Migrant adults that have flowed through and departed patch
+         dDm = gamma*S_Am
+         
+         # Milkweed growth
+         dM = r*M*(1-M/K) - c*(Ltot)
+         
+         # Contaminated milkweed
+         dMC = lambda*(1-MC/M)*(I_A) - mu_W*MC - c*(Ltot)*MC/M
+         
+         dy=c(dS_L,dI_V,dI_E,dI_H,dS_A,dI_A,dC_A,dS_Am,dS_Lm,dDm,dM,dMC)   
+         list(dy)   
+         
+       })
+  
+  
+}
+```
+
+```{r ODE function - environmental transmission only}
+#defining a system of ODEs for a simplified patch model where migrant larvae can pick up infection from the environment 
+
+diseaseEnvPatchModel <- function(time, y, params) {
+  
+  if (time > tau_e) Lag1 =lagvalue(time-tau_e) else Lag1 = y0 # time lag due to egg stage
+  if (time > tau_p) Lag2 =lagvalue(time-tau_p) else Lag2 = y0 # time lag due to pupa stage
+  
+  # Initializing state variables
+  S_L = y[1] # susceptible larvae
+  I_V = y[2] # infected larvae via vertical transmission
+  I_E = y[3] # infected larvae via environmental transmission
+  I_H = y[4] # infected larvae via adult transfer transmission
+  S_A = y[5] # susceptible adults
+  I_A = y[6] # infected adults
+  C_A = y[7] # contaminated adults
+  S_Am = y[8] # susceptible adult migrants
+  I_Am = y[9] #infected adult migrants
+  S_Lm = y[10] #susceptible migrant larvae 
+  I_Lm = y[11] #infected migrant larvae
+  DSm = y[12] # susceptible migrants that have departed the patch
+  DIm = y[13] # infected migrants that have departed the patch
+  M = y[14] # milkweed
+  MC = y[15] # contaminated milkweed
+  
+   #define ODEs
+  
+  with(as.list(params),
+       {
+         # Total number of larvae:
+         Ltot = sum(c(S_L, I_V, I_E, I_H, S_Lm, I_Lm)) 
+         # Total number of adults:
+         Atot = sum(c(S_A, I_A, C_A, S_Am, I_Am))
+         
+         #Lagged state variables
+         #Lag 1 (egg stage)
+           SA_laggedE = Lag1[5] # susceptible adults
+           IA_laggedE = Lag1[6] # infected adults
+           CA_laggedE = Lag1[7] # contaminated adults
+           SAm_laggedE = Lag1[8] # susecptible migrant adults
+           IAm_laggedE = Lag1[9] #infected migrant adults
+           
+          #Lag 2 (pupa stage)
+           SL_laggedP = Lag2[1] # susceptible larvae about to pupate
+           IV_laggedP = Lag2[2] # infected larvae via vertical transmission about to pupate
+           IE_laggedP = Lag2[3] # infected larvae via environmental transmission about to pupate
+           IH_laggedP = Lag2[4] # infected larvae via adult transfer transmission about to pupate
+           SLm_laggedP = Lag2[10] # susceptible larvae of migrants about to pupate
+           ILm_laggedP = Lag2[11] # infected larvae of migrants about to pupate
+           
+         # Susceptible larvae:
+         dS_L = b_s*SA_laggedE + b_s*(1-p_h)*CA_laggedE + b_i*(1-p_v)*IA_laggedE - g*S_L - (mu_0+mu_d*Ltot/M)*S_L - (c*MC*S_L/M)
+         
+         # Infected larvae via vertical transmission
+         dI_V = b_i*p_v*IA_laggedE - g*I_V - (mu_0+mu_d*Ltot/M)*I_V
+         
+         # Infected larvae via environmental transmission
+         dI_E = c*MC*S_L/M - (mu_0+mu_d*(Ltot)/M)*I_E -g*I_E
+         
+         # Infected larvae via adult transfer transmission
+         dI_H = b_s*p_h*CA_laggedE - (mu_0+mu_d*(Ltot)/M)*I_H -g*I_H
+         
+         # Susceptible adults
+         dS_A = g*SL_laggedP*rho - mu_S*S_A - delta*(S_A)*(I_A/Atot) + mu_C*C_A
+         
+         # Infected adults
+         dI_A = theta*g*(IV_laggedP+IE_laggedP+IH_laggedP)*rho-mu_I*I_A
+         
+         # Contaminated adults due to adult transfer
+         dC_A = delta*(S_A)*(I_A/Atot) - mu_S*C_A - mu_C*C_A
+         
+         # Susceptible migrant adults in patch
+         dS_Am = alpha + g*SLm_laggedP - mu_S*S_Am - gamma*S_Am
+         
+         # Infected migrant adults in patch
+         dI_Am = theta*g*ILm_laggedP*rho - mu_I*I_Am
+         
+         # Susceptible migrant larvae in patch
+         dS_Lm = b_s*SAm_laggedE - g*S_Lm - (mu_0+mu_d*(Ltot)/M)*S_Lm - c*MC*S_Lm/M
+         
+         # Infected migrant larvae in patch
+         dI_Lm = c*MC*S_Lm/M - (mu_0+mu_d*(Ltot)/M)*I_Lm - g*I_Lm # Infected larvae via environmental transmission
+         
+         # Susceptible migrant adults that have flowed through and departed patch
+         dDSm = gamma*S_Am
+         
+         #Infected migrant adults that have flowed through and departed patch
+         
+         dDIm = gamma*I_Am
+         
+         # Milkweed growth
+         dM = r*M*(1-M/K) - c*(Ltot)
+         
+         # Contaminated milkweed
+         dMC = lambda*(1-MC/M)*(I_A) - mu_W*MC - c*(Ltot)*MC/M
+         
+         dy=c(dS_L,dI_V,dI_E,dI_H,dS_A,dI_A,dC_A,dS_Am,dI_Am,dS_Lm,dI_Lm,dDSm,dDIm,dM,dMC)   
+         list(dy)   
+         
+       })
+  
+  
+}
+```
+
+```{r ODE functions - full patch model}
+#defining a system of ODEs for a patch model where migrants can transmit and pick up infections through environmental transmission, vertical transmission, and contamination 
+
+fullPatchModel <- function(time, y, params) {
+  
+  if (time > tau_e) Lag1 =lagvalue(time-tau_e) else Lag1 = y0 # time lag due to egg stage
+  if (time > tau_p) Lag2 =lagvalue(time-tau_p) else Lag2 = y0 # time lag due to pupa stage
+  
+  # Initializing state variables
+  S_L = y[1] # susceptible larvae
+  I_V = y[2] # infected larvae via vertical transmission
+  I_E = y[3] # infected larvae via environmental transmission
+  I_H = y[4] # infected larvae via adult transfer transmission
+  S_A = y[5] # susceptible adults
+  I_A = y[6] # infected adults
+  C_A = y[7] # contaminated adults
+  S_Am = y[8] # susceptible adult migrants
+  I_Am = y[9] #infected adult migrants
+  C_Am = y[10] # contaminated adult migrants 
+  S_Lm = y[11] #susceptible migrant larvae 
+  I_Vm = y[12] # infected migrant larvae, share infected thru vertical transmission
+  I_Em = y[13] #infected migrant larvae, share infected thru environmental transmission
+  I_Hm = y[14] #infected migrant larvae, share infected thru horizontal transfer transmission
+  DSm = y[15] # susceptible migrants that have departed the patch
+  DIm = y[16] # infected migrants that have departed the patch
+  DCm = y[17] #contaminated migrants that have departed the patch
+  M = y[18] # milkweed
+  MC = y[19] # contaminated milkweed
+  
+   #define ODEs
+  
+  with(as.list(params),
+       {
+         # Total number of larvae:
+         Ltot = sum(c(S_L, I_V, I_E, I_H, S_Lm, I_Vm, I_Em, I_Hm)) 
+         # Total number of adults:
+         Atot = sum(c(S_A, I_A, C_A, S_Am, I_Am, C_Am))
+         
+         #Lagged state variables
+         #Lag 1 (egg stage)
+           SA_laggedE = Lag1[5] # susceptible adults
+           IA_laggedE = Lag1[6] # infected adults
+           CA_laggedE = Lag1[7] # contaminated adults
+           SAm_laggedE = Lag1[8] # susceptible migrant adults
+           IAm_laggedE = Lag1[9] #infected migrant adults
+           CAm_laggedE = Lag1[10]
+           
+          #Lag 2 (pupa stage)
+           SL_laggedP = Lag2[1] # susceptible larvae about to pupate
+           IV_laggedP = Lag2[2] # infected larvae via vertical transmission about to pupate
+           IE_laggedP = Lag2[3] # infected larvae via environmental transmission about to pupate
+           IH_laggedP = Lag2[4] # infected larvae via adult transfer transmission about to pupate
+           SLm_laggedP = Lag2[11] # susceptible larvae of migrants about to pupate
+           IVm_laggedP = Lag2[12] # infected (via vertical transmission) larvae of migrants about to pupate
+           IEm_laggedP = Lag2[13] # infected (via environmental transmission) larvae of migrants about to pupate
+           IHm_laggedP = Lag2[14] # infected (via horizontal transfer) larvae of migrants about to pupate
+           
+         # Susceptible larvae:
+         dS_L = b_s*SA_laggedE + b_s*(1-p_h)*CA_laggedE + b_i*(1-p_v)*IA_laggedE - g*S_L - mu_0*S_L - (mu_d*Ltot/M)*S_L - (c*S_L*MC/M)
+         
+         # Infected larvae via vertical transmission
+         dI_V = b_i*p_v*IA_laggedE  - (mu_0+mu_d*Ltot/M)*I_V - g*I_V
+         
+         # Infected larvae via environmental transmission
+         dI_E = c*MC*S_L/M - (mu_0+mu_d*(Ltot)/M)*I_E -g*I_E
+         
+         # Infected larvae via adult transfer transmission
+         dI_H = b_s*p_h*CA_laggedE - (mu_0+mu_d*(Ltot)/M)*I_H -g*I_H
+         
+         # Susceptible adults
+         dS_A = g*SL_laggedP*rho - mu_S*S_A - delta*(S_A)*(I_A/Atot) + mu_C*C_A
+         
+         # Infected adults
+         dI_A = theta*g*(IV_laggedP+IE_laggedP+IH_laggedP)*rho-mu_I*I_A
+         
+         # Contaminated adults due to adult transfer
+         dC_A = delta*(S_A)*(I_A/Atot) - mu_S*C_A - mu_C*C_A 
+         
+         # Susceptible migrant adults in patch
+         dS_Am = alpha*(1-p_mi) + g*SLm_laggedP - mu_S*S_Am + mu_C*C_Am - gamma*S_Am
+         
+         # Infected migrant adults in patch
+         dI_Am = alpha*p_mi + theta*g*(IEm_laggedP+IVm_laggedP+IHm_laggedP)*rho - mu_I*I_Am - gamma*I_Am
+         
+         # Migrant adults contaminated by horizontal transfer, assumes random mating between residents and migrants
+         dC_Am = delta*S_Am*((I_A+I_Am)/Atot) - mu_S*C_Am - mu_C*C_Am - gamma*C_Am
+         
+         # Susceptible migrant larvae in patch
+         dS_Lm = b_s*SAm_laggedE + b_i*(1-p_v)*IAm_laggedE + b_s*(1-p_h)*CAm_laggedE  - (mu_0+mu_d*(Ltot)/M)*S_Lm - c*MC*S_Lm/M - g*S_Lm
+         
+         # Migrant larvae infected via vertical transmission
+         dI_Vm = b_i*p_v*IAm_laggedE - (mu_0+mu_d*Ltot/M)*I_Vm - g*I_Vm
+         
+         # Migrant larvae infected via environmental transmission
+         dI_Em = c*MC*S_Lm/M - (mu_0+mu_d*(Ltot)/M)*I_Em - g*I_Em 
+         
+         # Migrant larvae infected via horizontal transfer
+         dI_Hm = b_s*p_h*CAm_laggedE - (mu_0+mu_d*Ltot/M)*I_Hm - g*I_Hm
+         
+         # Susceptible migrant adults that have flowed through and departed patch
+         dDSm = gamma*S_Am
+         
+         #Infected migrant adults that have flowed through and departed patch
+         dDIm = gamma*I_Am
+         
+         #Contaminated migrant adults that have flowed through and departed patch
+         dDCm = gamma*C_Am
+         
+         # Milkweed growth
+         dM = r*M*(1-M/K) - c*(Ltot)
+         
+         # Contaminated milkweed
+         dMC = lambda*(1-MC/M)*(I_A) - mu_W*MC - c*(Ltot)*MC/M
+         
+         dy=c(dS_L,dI_V,dI_E,dI_H,dS_A,dI_A,dC_A,dS_Am,dI_Am,dC_Am,dS_Lm,dI_Vm, dI_Em,dI_Hm, dDSm,dDIm,dDCm,dM,dMC)   
+         list(dy)   
+         
+       })
+  
+  
+}
+```
+
+
+
+```{r defining parameters}
+# Define model parameters
+
+b_s = 9.208333*0.5      # Susceptible host fecundity rate * probability of egg surviving (eggs/adult/day)
+b_i = 6.5195*0.5        # Infected host fecundity rate (eggs/adult/day) * probability of egg surviving (eggs/adult/day)
+tau_e = 3               # Time in egg stage
+g = 1/9                 # Larval development rate 
+larvdens = 1.3          # Larval density
+rho = 0.76              # Probability of pupa surviving to adult
+mu_S = 1/24             # Mortality of uninfected adult
+mu_I = 1/20             # Mortality rate of infected adult
+mu_0 = -log(0.06)/9     # Density-independent per capita larval mortality rate 
+#mu_d = 1370             # Density-dependent per capita larval mortality rate (from final manuscript, not code on                           GitHub)
+mu_d = (200/larvdens)*(((b_s)*g*rho/mu_S) - mu_0 - g)   #Density-dependent per capita larval mortality rate (from code on GitHub)
+                        # Density-dependent per capita larval mortality rate 
+tau_p = 7               # Time in pupa stage
+theta = 0.72            # Probability of infected adult eclosing and mating
+p_v = 0.9               # Probability of vertical transmission
+p_h =  0.614            # Probability of contaminated adult infecting their offspring
+delta = 1/2             # Daily adult mating probability  
+mu_C= 1/14              # Rate of spore loss for contaminated adults
+r = 0.032               # Milkweed growth rate
+K = 40000               # End of season number of milkweed leaves (assuming 200 leaves per plant)
+c = 35/9                # Larval consumption rate of milkweed
+lambda = 50             # Milkweed leaf visitation rate by infected adults,  (leaves/day)
+mu_W = 0.0125           # Spore decay rate on milkweed 
+
+alpha = 3               # migrant arrival rate, butterflies/day
+gamma = 1/3             # 1/duration of migrant stay, 1/days
+p_mi = 0.0              # initial infection rate in migrants 
+
+# Combine parameters into single vector
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+```
+
+```{r running simulation - basic test run}
+# Define the range of time over which we want to solve the equations
+times = seq(0,300,by=1) #try 500 days
+
+# Initial conditions
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=18,I_A=2,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0)
+
+output <- dede(y = y0, times = times, func = fullPatchModel, parms = params)
+colnames(output)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+head(output)
+tail(output)
+
+outputDF <- as_tibble(output)
+outputDF$Total_ResidentAdults = outputDF$SA + outputDF$IA + outputDF$CA
+```
+
+```{r plotting basic test run}
+#Plotting infection prevalence in resident and migrant adults over time
+
+ggplot(outputDF, aes(Time, IA/(SA+IA+CA))) +
+  geom_line(aes(color = "black")) + 
+  labs(x="Time", y="Infection prevalence") + 
+  geom_line(aes(Time, IAm/(SAm+IAm+CAm), color = "red")) +
+  scale_color_identity(guide="legend", breaks = c("black", "red"), labels = c("Resident pop.", "Migrant pop."), name = "Adult Inf. prevalence")
+ 
+#Plotting accumulation of departed migrant pop
+
+ggplot(outputDF, aes(Time, DSm)) + 
+  geom_line(aes(color = "black")) + 
+  geom_line(aes(Time, DIm, color = "red")) + 
+  geom_line(aes(Time,DCm, color = "purple")) + 
+  geom_line(aes(Time,DSm+DCm, color = "navy")) +
+  labs(x="Time", y="Monarchs Departed (Cumulative)") +
+  scale_color_identity(name = "Bound for Summer Breeding Grounds", guide="legend", breaks = c("black","red", "purple", "navy"), labels = c("Susceptible", "Infected", "Contaminated", "All Uninfected"))
+
+```
+
+```{r single migrant pulse}
+# Setting time variables
+Tau_mi = 60 # duration of migration, days
+Tau_res = 365 - Tau_mi # resident only time, days
+
+# Burn in, residents only 
+alpha = 0 # no migrants enter the system during this time
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=18,I_A=2,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0)
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+times = seq(0,Tau_res,by=1)
+
+burnIn <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+colnames(burnIn)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+head(burnIn)
+tail(burnIn)
+
+burnIn.tib <- as_tibble(burnIn)
+
+# Migrant pulse
+y0 = as.numeric(tail(burnIn,1)) # set initial state variable vector to results from burned in resident pop
+y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+
+alpha = 3 # 3 migrants/day enter the patch
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+times = seq(0, Tau_mi, by = 1)
+
+pulse1 <- dede(y = y0, times = times, func = fullPatchModel, parms = params)
+colnames(pulse1)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+head(pulse1)
+tail(pulse1)
+
+pulse1.tib <- as_tibble(pulse1)
+
+#combining burn-in and pulse outputs into single dataframe
+pulse1.tib$Time = pulse1.tib$Time + Tau_res
+pulse1.full <- rbind(burnIn.tib, pulse1.tib)
+pulse1.full$ResPrev <- pulse1.full$IA/(pulse1.full$IA+pulse1.full$SA+pulse1.full$CA)
+pulse1.full$MigPrev <- pulse1.full$IAm/(pulse1.full$IAm+pulse1.full$SAm+pulse1.full$CAm)
+#Plotting
+
+timeSeries <- ggplot(pulse1.full, aes(Time, IA/(SA+IA+CA))) +
+  geom_line(aes(color = "black")) + 
+  labs(x="Time", y="Infection prevalence") + 
+  geom_line(aes(Time, IAm/(SAm+IAm+CAm), color = "red")) +
+  geom_vline(xintercept=Tau_res, lty=2) +
+  scale_color_identity(guide="legend", breaks = c("black", "red"), labels = c("Resident pop.", "Migrant pop."), name = "Adult Inf. prevalence") + 
+  theme_classic() + 
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  annotate("text", x = 200, y = 0.4, label = "Day 305: first migrants arrive")
+
+#Calculating final abundances after one migrant pulse
+
+#Final in-patch abundance
+larvae.res <- tail(pulse1,1)[2] + tail(pulse1,1)[3] + tail(pulse1,1)[4] + tail(pulse1,1)[5]#resident larvae abundance
+larvae.mi <- tail(pulse1,1)[12] + tail(pulse1,1)[13] + tail(pulse1,1)[14] + tail(pulse1,1)[15]#migrant larvae abundance
+
+adult.res <- tail(pulse1,1)[6] + tail(pulse1,1)[7] + tail(pulse1,1)[8] #resident adult abundance
+adult.mi <- tail(pulse1,1)[9] + tail(pulse1,1)[10] + tail(pulse1,1)[11] #migrant adult abundance
+
+#departed to breeding site
+departed <- tail(pulse1,1)[16] + tail(pulse1,1)[17] + tail(pulse1,1)[18]#total migrants departed to summer breeding site
+
+```
+
+```{r disease free comparison}
+
+# Setting time variables
+Tau_mi = 60 # duration of migration, days
+Tau_res = 365 - Tau_mi # resident only time, days
+
+#Disease free conditions
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=20,I_A=0,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0) #no initial infections or contamination
+p_v = 0 #no vertical transmission
+p_h = 0 #no infections from contaminated adults
+p_mi = 0 #migrants carry no initial infections
+
+#burn in
+
+alpha = 0 #no migrants enter patch
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+times = seq(0, Tau_res, by=1)
+
+burnIn.df <- dede(y = y0, times = times, func = fullPatchModel, parms = params)
+colnames(burnIn.df)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+
+#with migrant pulse
+
+alpha = 3 # 3 migrants enter patch per day
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+y0 = as.numeric(tail(burnIn.df,1)) # set initial state variable vector to results from burned in resident pop
+y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+
+times = seq(0, Tau_mi, by=1)
+
+diseaseFree <- dede(y = y0, times = times, func = fullPatchModel, parms = params)
+colnames(diseaseFree)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+head(diseaseFree)
+tail(diseaseFree)
+
+#Calculating disease-free metrics
+
+#Final in-patch abundance
+larvae.res.df <- tail(diseaseFree,1)[2] #resident larvae abundance
+larvae.mi.df <- tail(diseaseFree,1)[12] #migrant larvae abundance
+
+adult.res.df <- tail(diseaseFree,1)[6] #resident adult abundance
+adult.mi.df <- tail(diseaseFree,1)[9] #migrant adult abundance
+
+#departed to breeding site
+departed.df <- tail(diseaseFree,1)[16] #total migrants departed to summer breeding site
+
+#comparison to Majewska data 
+
+burnIn[151,2] + burnIn[151,3] + burnIn[151,4] + burnIn[1,5] #larval abundance at time = 150, disease case 
+burnIn.df[151, 2] #larval abundance at time = 150, disease free
+
+burnIn[151,6] + burnIn[151,7] + burnIn[151,8] #adult abundance at time = 150, disease case 
+burnIn.df[151, 6] #adult abundance at time = 150, disease free
+
+#consistent with Majewska 2019, disease free abundance is about twice that of abundance with disease 
+```
+
+```{r no migration comparison}
+
+# Setting time variables
+Tau_res = 365 
+alpha = 0 # no migrants enter the system during this time
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=18,I_A=2,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0)
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+times = seq(0,Tau_res,by=1) 
+
+noMigrants <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+colnames(noMigrants)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+
+noMigrants <- noMigrants[305:365,]
+noMigrants <- as_tibble(noMigrants)
+  
+noMigrants$TotInfLarvae <-noMigrants$IV + noMigrants$IE + noMigrants$IH
+noMigrants$TotLarvae <- noMigrants$SL + noMigrants$TotInfLarvae
+noMigrants$Prev <- noMigrants$TotInfLarvae / noMigrants$TotLarvae
+```
+
+
+```{r storing abundance and prevalence after 1 pulse of migrants}
+#calculating total and total infected resident larvae
+pulse1.tib$TotInfLarvaeR <- pulse1.tib$IV + pulse1.tib$IE + pulse1.tib$IH
+pulse1.tib$TotLarvaeR <- pulse1.tib$SL + pulse1.tib$TotInfLarvaeR
+pulse1.tib$PrevLR <- pulse1.tib$TotInfLarvaeR / pulse1.tib$TotLarvaeR
+
+#calculating total and total infected migrant larvae
+pulse1.tib$TotInfLarvaeM <- pulse1.tib$I_Vm + pulse1.tib$I_Em + pulse1.tib$I_Hm
+pulse1.tib$TotLarvaeM <- pulse1.tib$S_Lm + pulse1.tib$TotInfLarvaeM
+pulse1.tib$PrevLM <- pulse1.tib$TotInfLarvaeM / pulse1.tib$TotLarvaeM
+
+```
+
+```{r plotting abundance over migrant pulse}
+#Plotting change in larval abundance over time during migrant pulse with disease and in disease free scenario 
+pulse1.tib$Time = pulse1.tib$Time - Tau_res
+
+ggplot(pulse1.tib) +
+  geom_line(aes(Time, TotLarvaeR,color = "black", linetype = "Total larvae")) +
+  geom_line(aes(Time, TotInfLarvaeR, color = "black", linetype = "Infected larvae")) +
+  geom_line(aes(Time, TotLarvaeM, color = "red", lty = "Total larvae")) +
+  geom_line(aes(Time, TotInfLarvaeM, color = "red", lty = "Infected larvae")) +
+  geom_line(data = diseaseFree, aes(Time, SL, color = "black", linetype = "Total larvae (disease free scenario)")) +
+  geom_line(data = diseaseFree, aes(Time, S_Lm, color = "red", linetype = "Total larvae (disease free scenario)")) +
+  scale_linetype_manual(guide="legend", name = "Larval Abundance", values = c(2,1,3)) + 
+  labs(x="Time Since Arrival of 1st Migrant (days)", y="Larval Abundance") + 
+  scale_color_identity(guide="legend", breaks = c("black", "red"), labels = c("Resident pop.", "Migrant pop."), name = "") + 
+  theme_classic()
+
+#Plotting milkweed over time during migrant pulse with disease and in disease free scenario 
+
+ggplot(pulse1.tib) + 
+  geom_line(aes(Time, M, color = "Total Milkweed")) + 
+  geom_line(aes(Time, MC, color = "Contaminated Milkweed")) +
+  geom_line(data = diseaseFree, aes(Time, M, color = "Total Milkweed (disease free)")) +
+  scale_color_manual(values=c("green2", "darkgreen", "palegreen"), name = "") + 
+  labs(x = "Time since 1st migrant (days)", y = "Milkweed Abundance") + 
+  theme_classic()
+
+#Plotting milkweed and larvae during burn-in/without migrants for disease free and resident scenario
+
+ggplot(burnIn.tib) + 
+  geom_line(aes(Time, M/100, color = "darkgreen")) +
+  geom_line(aes(Time, (SL + IV + IE + IH), color = "black")) + 
+  geom_line(data= burnIn.df, aes(Time, M/100, color = "palegreen")) + 
+  geom_line(data= burnIn.df, aes(Time, (SL + IV + IE + IH), color = "grey")) +
+  scale_y_continuous(name = "Larval Abundance", sec.axis = sec_axis(~.*100, name="Milkweed Abundance")) +
+  scale_color_identity(guide="legend", breaks = c("darkgreen", "black", "palegreen", "grey"), labels = c("Milkweed", "Larvae", "Milkweed (disease free)", "Larvae (disease free)"), name = "") + 
+  theme_classic()
+  
+```
+
+```{r relative importance of modes of infection}
+#Calcuating model predictions for relative importance of each mode of infection over the course of the migrant pulse and without migrants 
+
+#Residents in migrant pulse scenario 
+
+VertR <- pulse1.tib$IV / pulse1.tib$TotInfLarvaeR #proportion of infected resident larvae infected by adult transmission
+EnvR <- pulse1.tib$IE/pulse1.tib$TotInfLarvaeR #proportion of infected resident larvae infected by environmental transmission
+HortR <- pulse1.tib$IH/pulse1.tib$TotInfLarvaeR #proportion of infected resident larvae infected by environmental transmission
+
+R1_R <- data.frame(cbind(pulse1.tib$Time,VertR))
+R1_R$Route <- "V  (vertical transmission)"
+R1_R$Population <- "Resident"
+R1_R$Scenario <- "Single Migrant Pulse"
+R1_R %<>%
+  rename(Time = V1)
+  
+R2_R <- data.frame(cbind(pulse1.tib$Time,EnvR))
+R2_R$Route <- "E  (environmental transmission)"
+R2_R$Population <- "Resident"
+R2_R$Scenario <- "Single Migrant Pulse"
+R2_R %<>%
+    rename(Time = V1)
+
+R3_R <- data.frame(cbind(pulse1.tib$Time,HortR))
+R3_R$Route <- "A  (adult transfer)"
+R3_R$Population <- "Resident"
+R3_R$Scenario <- "Single Migrant Pulse"
+R3_R %<>%
+    rename(Time = V1)
+
+R1_R<-renameCol(R1_R,c("VertR"), c("RelImp"))
+R2_R<-renameCol(R2_R,c("EnvR"), c("RelImp"))
+R3_R<-renameCol(R3_R,c("HortR"), c("RelImp"))
+dfRI_R<-rbind(R1_R,R2_R)
+dfRI_R<-rbind(dfRI_R,R3_R)
+
+# Migrants in Migrant Pulse Scenario
+
+VertM <- pulse1.tib$I_Vm / pulse1.tib$TotInfLarvaeM #proportion of infected migrant larvae infected by adult transmission
+EnvM <- pulse1.tib$I_Em/pulse1.tib$TotInfLarvaeM #proportion of infected migrant larvae infected by environmental transmission
+HortM <- pulse1.tib$I_Hm/pulse1.tib$TotInfLarvaeM #proportion of infected migrant larvae infected by environmental transmission
+
+R1_M <- data.frame(cbind(pulse1.tib$Time,VertM))
+R1_M$Route <- "V  (vertical transmission)"
+R1_M$Population <- "Migrant"
+R1_M$Scenario <- "Single Migrant Pulse"
+R1_M %<>%
+  rename(Time = V1)
+  
+R2_M <- data.frame(cbind(pulse1.tib$Time,EnvM))
+R2_M$Route <- "E  (environmental transmission)"
+R2_M$Population <- "Migrant"
+R2_M$Scenario <- "Single Migrant Pulse"
+R2_M %<>%
+    rename(Time = V1)
+
+R3_M <- data.frame(cbind(pulse1.tib$Time,HortM))
+R3_M$Route <- "A  (adult transfer)"
+R3_M$Population <- "Migrant"
+R3_M$Scenario <- "Single Migrant Pulse"
+R3_M %<>%
+    rename(Time = V1)
+
+R1_M<-renameCol(R1_M,c("VertM"), c("RelImp"))
+R2_M<-renameCol(R2_M,c("EnvM"), c("RelImp"))
+R3_M<-renameCol(R3_M,c("HortM"), c("RelImp"))
+dfRI_M<-rbind(R1_M,R2_M)
+dfRI_M<-rbind(dfRI_M,R3_M)
+
+dfRI <- rbind(dfRI_R, dfRI_M)
+
+dfRI$Route<-as.factor(dfRI$Route)
+dfRI$Route<- factor(dfRI$Route, levels = rev(levels(dfRI$Route)))
+dfRI$Population<-as.factor(dfRI$Population)
+dfRI$Scenario<-as.factor(dfRI$Scenario)
+  
+#Plotting relative importance of each mode of transmission for residents and migrants 
+ggplot()+
+  geom_line(data=dfRI,aes(x=Time, y=RelImp,linetype=Route,col=Population), size = 1.5,na.rm=TRUE, stat="identity")+
+  theme_classic()+
+  labs(fill="", x="Time (days)", y = "Relative importance")+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+  scale_color_manual(values=c('red','black'))+
+  theme(axis.text=element_text(size=20),
+        axis.title.x = element_text(size=20),
+        axis.text.x = element_text(size=18),
+        axis.title.y = element_text(size=20),
+        legend.text = element_text(size=16),
+        legend.title = element_blank(),
+        legend.position = c(0.6, 0.95),
+        legend.key.width = unit(1.5,"cm"), 
+        legend.box = "horizontal")+
+  theme(plot.margin=unit(c(1.5,1.5,1.5,1.5),"cm")) 
+
+# Calculating Relative Importance of modes of transmission in a resident population that experiences no migrant pulse
+
+VertNM <- noMigrants$IV / noMigrants$TotInfLarvae #proportion of infected resident larvae infected by adult transmission
+EnvNM <- noMigrants$IE / noMigrants$TotInfLarvae #proportion of infected resident larvae infected by environmental transmission
+HortNM <- noMigrants$IH / noMigrants$TotInfLarvae #proportion of infected resident larvae infected by environmental transmission
+
+R1_NM <- data.frame(cbind(noMigrants$Time,VertNM))
+R1_NM$Route <- "V  (vertical transmission)"
+R1_NM$Population <- "Resident"
+R1_NM$Scenario <- "No Migrants"
+R1_NM %<>%
+  rename(Time = V1)
+  
+R2_NM <- data.frame(cbind(noMigrants$Time,EnvNM))
+R2_NM$Route <- "E  (environmental transmission)"
+R2_NM$Population <- "Resident"
+R2_NM$Scenario <- "No Migrants"
+R2_NM %<>%
+  rename(Time = V1)
+
+R3_NM <- data.frame(cbind(noMigrants$Time,HortNM))
+R3_NM$Route <- "A  (adult transfer)"
+R3_NM$Population <- "Resident"
+R3_NM$Scenario <- "No Migrants"
+R3_NM %<>%
+    rename(Time = V1)
+
+R1_NM<-renameCol(R1_NM,c("VertNM"), c("RelImp"))
+R2_NM<-renameCol(R2_NM,c("EnvNM"), c("RelImp"))
+R3_NM<-renameCol(R3_NM,c("HortNM"), c("RelImp"))
+dfRI_NM<-rbind(R1_NM,R2_NM)
+dfRI_NM<-rbind(dfRI_NM,R3_NM)
+
+dfRI.all <- rbind(dfRI, dfRI_NM)
+dfRI.res <- rbind(dfRI_R, dfRI_NM)
+
+#Plotting relative importance of each mode of transmission for residents in a patch that does and does not experience a pulse of migrants 
+ggplot()+
+  geom_line(data=dfRI.res,aes(x=Time, y=RelImp,linetype=Route,col=Scenario), size = 1.5,na.rm=TRUE, stat="identity")+
+  theme_classic()+
+  labs(fill="", x="Time (days)", y = "Relative importance")+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+  scale_color_manual(values=c('palegreen','black'))+
+  theme(axis.text=element_text(size=20),
+        axis.title.x = element_text(size=20),
+        axis.text.x = element_text(size=18),
+        axis.title.y = element_text(size=20),
+        legend.text = element_text(size=16),
+        legend.title = element_blank(),
+        legend.position = c(0.6, 0.95),
+        legend.key.width = unit(1.5,"cm"), 
+        legend.box = "horizontal")+
+  theme(plot.margin=unit(c(1.5,1.5,1.5,1.5),"cm")) 
+
+```
+
+```{r reinitializing parameters}
+# Define model parameters
+
+b_s = 9.208333*0.5      # Susceptible host fecundity rate * probability of egg surviving (eggs/adult/day)
+b_i = 6.5195*0.5        # Infected host fecundity rate (eggs/adult/day) * probability of egg surviving (eggs/adult/day)
+tau_e = 3               # Time in egg stage
+g = 1/9                 # Larval development rate 
+larvdens = 1.3          # Larval density
+rho = 0.76              # Probability of pupa surviving to adult
+mu_S = 1/24             # Mortality of uninfected adult
+mu_I = 1/20             # Mortality rate of infected adult
+mu_0 = -log(0.06)/9     # Density-independent per capita larval mortality rate 
+#mu_d = 1370             # Density-dependent per capita larval mortality rate (from final manuscript, not code on                           GitHub)
+mu_d = (200/larvdens)*(((b_s)*g*rho/mu_S) - mu_0 - g)   #Density-dependent per capita larval mortality rate (from code on GitHub)
+                        # Density-dependent per capita larval mortality rate 
+tau_p = 7               # Time in pupa stage
+theta = 0.72            # Probability of infected adult eclosing and mating
+p_v = 0.9               # Probability of vertical transmission
+p_h =  0.614            # Probability of contaminated adult infecting their offspring
+delta = 1/2             # Daily adult mating probability  
+mu_C= 1/14              # Rate of spore loss for contaminated adults
+r = 0.032               # Milkweed growth rate
+K = 40000               # End of season number of milkweed leaves (assuming 200 leaves per plant)
+c = 35/9                # Larval consumption rate of milkweed
+lambda = 50             # Milkweed leaf visitation rate by infected adults,  (leaves/day)
+mu_W = 0.0125           # Spore decay rate on milkweed 
+
+alpha = 3               # migrant arrival rate, butterflies/day
+gamma = 1/3             # 1/duration of migrant stay, 1/days
+p_mi = 0.0              # initial infection rate in migrants 
+
+# Combine parameters into single vector
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+```
+
+Freeze events over the winter can cause mass mortality among residents and also kill off milkweed. This is expected to impact the resident population directly, and may indirectly impact the migratory population by impacting the resources they experience on thier migration, the competition they face from residents, and the potential for disease transmission between the populations. 
+```{r winter freeze scenario}
+# Setting time variables
+Tau_mi = 60 # duration of migration, days
+Tau_res = 365 - Tau_mi # resident only time, days
+Tau_f = 270 #day of winter freeze
+
+# Burn in, residents only 
+alpha = 0 # no migrants enter the system during this time
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=18,I_A=2,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0)
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+times = seq(0,Tau_f-1,by=1)
+
+burnInF <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+colnames(burnInF)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+
+burnInF.tib <- as_tibble(burnInF)
+
+# winter freeze, residents only (assuming no differential freeze-related mortality btw infected and uninfected)
+mu_lf = 0.85 # freeze related mortality as proportion of larvae killed 
+mu_af = 0.85 # freeze related mortality as proportion of adults killed
+mu_mf = 0.5 # freeze related milkweed loss as proportion of leaves shed 
+
+y0 = as.numeric(tail(burnInF,1))
+y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+y0[1] = y0[1]*(1-mu_lf)
+y0[2] = y0[2]*(1-mu_lf)
+y0[3] = y0[3]*(1-mu_lf)
+y0[4] = y0[4]*(1-mu_lf)
+y0[5] = y0[5]*(1-mu_af)
+y0[6] = y0[6]*(1-mu_af)
+y0[7] = y0[7]*(1-mu_af)
+y0[18] = y0[18]*(1-mu_mf)
+y0[19] = y0[19]*(1-mu_mf)
+
+# resident recovery from freeze
+times <- seq(0, Tau_res-Tau_f, by = 1)
+
+recovery <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+colnames(recovery)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+
+recovery.tib <- as_tibble(recovery)
+
+# Migrant pulse
+y0 = as.numeric(tail(recovery,1))
+y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+
+alpha = 3 # 3 migrants/day enter the patch
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+times = seq(0, Tau_mi, by = 1)
+
+pulse.postF <- dede(y = y0, times = times, func = fullPatchModel, parms = params)
+colnames(pulse.postF)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+
+pulse.postF.tib <- as_tibble(pulse.postF)
+
+#combining burn-in and pulse outputs into single dataframe
+recovery.tib$Time = recovery.tib$Time + Tau_f
+pulse.postF.tib$Time = pulse.postF.tib$Time + Tau_res
+pulse.Freeze.full <- rbind(burnInF.tib, recovery.tib)
+pulse.Freeze.full <- rbind(pulse.Freeze.full, pulse.postF.tib)
+
+#Plotting
+
+freeze.plot <- ggplot(pulse.Freeze.full, aes(Time, IA/(SA+IA+CA))) +
+  geom_line(aes(color = "black")) + 
+  labs(x="Time", y="Infection prevalence") + 
+  geom_line(aes(Time, IAm/(SAm+IAm+CAm), color = "red")) +
+  geom_vline(xintercept=Tau_f, lty=2) +
+  geom_vline(xintercept=Tau_res, lty=2) +
+  scale_color_identity(guide="legend", breaks = c("black", "red"), labels = c("Resident pop.", "Migrant pop."), name = "Adult Inf. prevalence") + 
+  theme_classic() + 
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1)) +
+  annotate("text", x = 250, y = 0.4, label = "Day 305: first migrants arrive") +
+  annotate("text", x = 200, y = 0.2, label = "Day 270: winter freeze")
+
+timeSeries + freeze.plot
+```
+
+
+```{r reinitializing parameters}
+# Define model parameters
+
+b_s = 9.208333*0.5      # Susceptible host fecundity rate * probability of egg surviving (eggs/adult/day)
+b_i = 6.5195*0.5        # Infected host fecundity rate (eggs/adult/day) * probability of egg surviving (eggs/adult/day)
+tau_e = 3               # Time in egg stage
+g = 1/9                 # Larval development rate 
+larvdens = 1.3          # Larval density
+rho = 0.76              # Probability of pupa surviving to adult
+mu_S = 1/24             # Mortality of uninfected adult
+mu_I = 1/20             # Mortality rate of infected adult
+mu_0 = -log(0.06)/9     # Density-independent per capita larval mortality rate 
+#mu_d = 1370             # Density-dependent per capita larval mortality rate (from final manuscript, not code on                           GitHub)
+mu_d = (200/larvdens)*(((b_s)*g*rho/mu_S) - mu_0 - g)   #Density-dependent per capita larval mortality rate (from code on GitHub)
+                        # Density-dependent per capita larval mortality rate 
+tau_p = 7               # Time in pupa stage
+theta = 0.72            # Probability of infected adult eclosing and mating
+p_v = 0.9               # Probability of vertical transmission
+p_h =  0.614            # Probability of contaminated adult infecting their offspring
+delta = 1/2             # Daily adult mating probability  
+mu_C= 1/14              # Rate of spore loss for contaminated adults
+r = 0.032               # Milkweed growth rate
+K = 40000               # End of season number of milkweed leaves (assuming 200 leaves per plant)
+c = 35/9                # Larval consumption rate of milkweed
+lambda = 50             # Milkweed leaf visitation rate by infected adults,  (leaves/day)
+mu_W = 0.0125           # Spore decay rate on milkweed 
+
+alpha = 3               # migrant arrival rate, butterflies/day
+gamma = 1/3             # 1/duration of migrant stay, 1/days
+p_mi = 0.0              # initial infection rate in migrants 
+
+# Combine parameters into single vector
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+```
+
+
+Varying alpha: The abundance of migratory monarchs present at overwintering sites has varied dramatically over recent years (https://monarchjointventure.org/blog/eastern-monarch-butterfly-population-falls-to-less-than-one-hectare-in-the-2023-2024-overwintering-season). Even within the past 10 years, the area occupied by overwintering monarchs in Mexico has varied by a factor of ~9. Given this variation, it is reasonable to expect that alpha, the daily rate of migrants that enter a habitat patch, may vary. As a result of this variation, not only would the intensity of migrant use of the habitat be expected to chagne, but also the migrant/resident ratio. 
+
+
+```{r varying alpha }
+
+alpha_vals <- seq(0, 20) #vary alpha between 0 individuals/day and 20 individuals/day 
+
+alpha.runs <- vector(mode = "list", length = length(alpha_vals))
+
+Tau_mi = 60 # duration of migration, days
+Tau_res = 365 - Tau_mi # resident only time, days
+
+# Burn in, residents only 
+alpha = 0 # no migrants enter the system during this time
+y0 = c(S_L=0,I_V=0,I_E=0,I_H=0,S_A=18,I_A=2,C_A=0,S_Am=0,I_Am=0,C_Am=0,S_Lm=0,I_Vm=0,I_Em=0,I_Hm=0,DSm=0,DIm=0,DCm=0,M=7000,MC=0)
+params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+
+times = seq(0,Tau_res,by=1)
+
+burnIn <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+
+# Migrant pulse
+
+for (i in 1:length(alpha_vals)) {
+  y0 = as.numeric(tail(burnIn,1)) # set initial state variable vector to results from burned in resident pop
+  y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+  alpha = alpha_vals[i]
+  params = c(r, K, b_s,b_i,mu_0,mu_d,g,c,theta,lambda,p_v,mu_I,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,alpha, gamma, p_mi)
+  times = seq(0, Tau_mi, by = 1)
+  
+  out.alpha <- dede(y = y0, times = times, func = fullPatchModel, parms = params, method='lsoda', rtol=1e-14)
+  colnames(out.alpha)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+  alpha.runs[[i]] <- out.alpha
+}
+
+# Formatting outputs
+
+#average prevalence in resident pop (larvae and adult) over time for each run 
+
+#Larvae
+Resident.PrevL <- tibble(.rows = length(alpha_vals))
+Resident.PrevL$Alpha <- alpha_vals
+Resident.PrevL$Population <- "Resident"
+Resident.PrevL$LifeStage <- "Larvae"
+Resident.PrevL$Average_Prev <- NA
+Resident.PrevL$Max_Prev <- NA
+Resident.PrevL$Final_Prev <- NA
+
+for (j in 1:length(alpha_vals)) {
+  Resident.PrevL$Average_Prev[j] <- mean(((alpha.runs[[j]][,3]+alpha.runs[[j]][,4]+alpha.runs[[j]][,5])/(alpha.runs[[j]][,2]+alpha.runs[[j]][,3]+alpha.runs[[j]][,4]+alpha.runs[[j]][,5])))
+  Resident.PrevL$Max_Prev[j] <- max(((alpha.runs[[j]][,3]+alpha.runs[[j]][,4]+alpha.runs[[j]][,5])/(alpha.runs[[j]][,2]+alpha.runs[[j]][,3]+alpha.runs[[j]][,4]+alpha.runs[[j]][,5])))
+  Resident.PrevL$Final_Prev[j] <- (tail(alpha.runs[[j]][,3],1)+tail(alpha.runs[[j]][,4],1)+tail(alpha.runs[[j]][,5],1))/(tail(alpha.runs[[j]][,2],1)+tail(alpha.runs[[j]][,3],1)+tail(alpha.runs[[j]][,4],1)+tail(alpha.runs[[j]][,5],1))
+}
+
+#Adult
+
+Resident.PrevA <- tibble(.rows = length(alpha_vals))
+Resident.PrevA$Alpha <- alpha_vals
+Resident.PrevA$Population <- "Resident"
+Resident.PrevA$LifeStage <- "Adult"
+Resident.PrevA$Average_Prev <- NA
+Resident.PrevA$Max_Prev <- NA
+Resident.PrevA$Final_Prev <- NA
+
+for (j in 1:length(alpha_vals)) {
+  Resident.PrevA$Average_Prev[j] <- mean((alpha.runs[[j]][,7]/(alpha.runs[[j]][,8]+alpha.runs[[j]][,7]+alpha.runs[[j]][,6])))
+  Resident.PrevA$Max_Prev[j] <- max((alpha.runs[[j]][,7]/(alpha.runs[[j]][,8]+alpha.runs[[j]][,7]+alpha.runs[[j]][,6])))
+  Resident.PrevA$Final_Prev[j] <-   
+    (tail(alpha.runs[[j]][,7],1)/(tail(alpha.runs[[j]][,8],1)+tail(alpha.runs[[j]][,7],1)+tail(alpha.runs[[j]][,6],1)))
+}
+
+Resident.Prev <- rbind(Resident.PrevL, Resident.PrevA)
+
+#average prevalence in migrant pop (larvae and adult) over time for each run, and final prevalence in departed migrant population
+
+#Larvae
+Migrant.PrevL <- tibble(.rows = length(alpha_vals))
+Migrant.PrevL$Alpha <- alpha_vals
+Migrant.PrevL$Population <- "Migrant"
+Migrant.PrevL$LifeStage <- "Larvae"
+Migrant.PrevL$Average_Prev <- NA
+Migrant.PrevL$Max_Prev <- NA
+Migrant.PrevL$Final_Prev <- NA
+
+for (j in 1:length(alpha_vals)) {
+  Migrant.PrevL$Average_Prev[j] <- mean(((alpha.runs[[j]][,13]+alpha.runs[[j]][,14]+alpha.runs[[j]][,15])/(alpha.runs[[j]][,12]+alpha.runs[[j]][,13]+alpha.runs[[j]][,14]+alpha.runs[[j]][,15])), na.rm = TRUE)
+  Migrant.PrevL$Max_Prev[j] <- max(((alpha.runs[[j]][,13]+alpha.runs[[j]][,14]+alpha.runs[[j]][,15])/(alpha.runs[[j]][,12]+alpha.runs[[j]][,13]+alpha.runs[[j]][,14]+alpha.runs[[j]][,15])), na.rm = TRUE)
+  Migrant.PrevL$Final_Prev[j] <- (tail(alpha.runs[[j]][,13],1)+tail(alpha.runs[[j]][,14],1)+tail(alpha.runs[[j]][,15],1))/(tail(alpha.runs[[j]][,12],1)+tail(alpha.runs[[j]][,13],1)+tail(alpha.runs[[j]][,14],1)+tail(alpha.runs[[j]][,15],1))                     }
+
+#Adults
+Migrant.PrevA <- tibble(.rows = length(alpha_vals))
+Migrant.PrevA$Alpha <- alpha_vals
+Migrant.PrevA$Population <- "Migrant"
+Migrant.PrevA$LifeStage <- "Adult"
+Migrant.PrevA$Average_Prev <- NA
+Migrant.PrevA$Max_Prev <- NA
+Migrant.PrevA$Final_Prev <- NA
+
+for (j in 1:length(alpha_vals)) {
+  Migrant.PrevA$Average_Prev[j] <- mean((alpha.runs[[j]][,10]/(alpha.runs[[j]][,10]+alpha.runs[[j]][,11]+alpha.runs[[j]][,9])), na.rm = TRUE)
+  Migrant.PrevA$Max_Prev[j] <- max((alpha.runs[[j]][,10]/(alpha.runs[[j]][,10]+alpha.runs[[j]][,11]+alpha.runs[[j]][,9])), na.rm = TRUE)
+  Migrant.PrevA$Final_Prev[j] <- tail(alpha.runs[[j]][,10],1)/(tail(alpha.runs[[j]][,10],1)+tail(alpha.runs[[j]][,11],1)+tail(alpha.runs[[j]][,9],1))
+}
+
+#Departed
+Migrant.PrevD <- tibble(.rows = length(alpha_vals))
+Migrant.PrevD$Alpha <- alpha_vals
+Migrant.PrevD$Population <- "Migrant"
+Migrant.PrevD$LifeStage <- "Adult-Departed"
+Migrant.PrevD$Average_Prev <- NA
+Migrant.PrevD$Max_Prev <- NA
+Migrant.PrevD$Final_Prev <- NA
+
+for (j in 1:length(alpha_vals)) {
+  Migrant.PrevD$Average_Prev[j] <- mean(alpha.runs[[j]][,17]/(alpha.runs[[j]][,18]+alpha.runs[[j]][,17]+alpha.runs[[j]][,16]), na.rm = TRUE)
+  Migrant.PrevD$Max_Prev[j] <- max(alpha.runs[[j]][,17]/(alpha.runs[[j]][,18]+alpha.runs[[j]][,17]+alpha.runs[[j]][,16]), na.rm = TRUE)
+  Migrant.PrevD$Final_Prev[j] <- tail(alpha.runs[[j]][,17],1)/(tail(alpha.runs[[j]][,18],1)+tail(alpha.runs[[j]][,17],1)+tail(alpha.runs[[j]][,16],1))
+}
+
+Migrant.Prev <- rbind(Migrant.PrevL, Migrant.PrevA)
+Migrant.Prev <- rbind(Migrant.Prev, Migrant.PrevD)
+
+PrevVsAlpha <- rbind(Resident.Prev, Migrant.Prev) #Stitching togther tibbles
+
+#Plotting 
+
+mean.plot <- ggplot(PrevVsAlpha, aes(Alpha, Average_Prev, color = Population, linetype = LifeStage)) + 
+  geom_line() + 
+  theme_classic() + 
+  labs(x="Magnitude of Migrant Influx", y = "Mean Infection Prevalence over 60 days")+
+  scale_x_continuous(limits = c(1, 20))+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+  scale_color_manual(values=c('red','black'))
+
+max.plot <- ggplot(PrevVsAlpha, aes(Alpha, Max_Prev, color = Population, linetype = LifeStage)) + 
+  geom_line() + 
+  theme_classic() + 
+  labs(x="Magnitude of Migrant Influx", y = "Maximum infection prevalence over 60 days")+
+  scale_x_continuous(limits = c(1, 20))+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+  scale_color_manual(values=c('red','black'))
+
+final.plot <- ggplot(PrevVsAlpha, aes(Alpha, Final_Prev, color = Population, linetype = LifeStage)) + 
+  geom_line() + 
+  theme_classic() + 
+  labs(x="Magnitude of Migrant Influx", y = "End infection prevalence after 60 days")+
+  scale_x_continuous(limits = c(1, 20))+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1))+
+  scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+  scale_color_manual(values=c('red','black'))
+
+mean.plot + max.plot + final.plot + plot_layout(ncol = 3, guides = "collect")
+```
+
+Latin Hypercube Sampling: Rather than varying all parameters, I selected a few parameters where I was most concerned about the effects of uncertainty. I repeated my analysis of variation in alpha using Latin Hypercube Sampling to vary other parameters of concern. 
+
+```{r setting parameter ranges}
+# parameter range from Majewska et al.,2019 + added parameters
+
+# Vary parameters of interest. 
+
+# duration of individual migrant persistence
+gamma_min <- 1/15
+gamma_max <- 1
+
+# fecundity cost of infection
+b_imin <- 4.6/2
+b_imax <- 4.6
+
+
+# mortality cost of infection (subadult stages)
+thetamin = 0.72 - .28            # Probability of infected adult eclosing and mating
+thetamax = 0.72 + .28
+
+# mortality cost of infection (adult)
+mu_Imin = 1/20  
+mu_Imax = 1/(20-5)
+
+# density-dependent larval mortality
+larvdensmin <- 0.25
+larvdensmax <- 3
+mu_dmin <- (200/larvdensmax)*(((b_s)*g*rho/mu_S) - mu_0 - g)
+mu_dmax <- (200/larvdensmin)*(((b_s)*g*rho/mu_S) - mu_0 - g)
+
+# Other parameters will remain fixed 
+fixedParams = c(r, K, b_s,mu_0,g,c,lambda,p_v,mu_S,mu_W,mu_C,delta,p_h,tau_e,tau_p,p_mi)
+
+# Setting ranges and minima for test parameters 
+
+param_range = c((gamma_max-gamma_min), (b_imax-b_imin), (thetamax - thetamin), (mu_Imax - mu_Imin), (mu_dmax-mu_dmin))
+
+param_min = c(gamma_min, b_imin, thetamin, mu_Imin, mu_dmin)
+```
+
+```{r sampling random points in hypercube}
+nparams = 5
+points = 50
+Tspan = 0:Tau_mi  #output once a day
+y0 = as.numeric(tail(burnIn,1)) # set initial state variable vector to results from burned in resident pop
+y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+
+alpha_vals <- seq(0, 20) #vary alpha between 0 individuals/day and 20 individuals/day 
+
+LHS = lhsDesign(points,nparams)
+
+params2=matrix(rep(NA,points*nparams),nrow=points,ncol=nparams)
+for (j in 1:nparams){
+    params2[,j]=LHS$design[,j]*param_range[j] + param_min[j]
+}
+colnames(params2)=c("gamma", "b_i", "theta", "mu_I", "mu_d")
+```
+
+```{r run model for each set of variable parameters}
+
+#Testing with one set of sampled parameters 
+alpha = alpha_vals[1]
+out.LHS.test <- dede(y = y0, times = Tspan, func = fullPatchModel, parms = c(fixedParams, params2[1,], alpha),rtol=1e-14)
+colnames(out.LHS.test)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+head(out.LHS.test)
+tail(out.LHS.test) #Looks reasonable! 
+
+# run all sampled parameter sets
+
+LHS.Outputs <- vector(mode="list", length = length(alpha_vals)) #create a vector to store runs for set of parameters (points) for each value of alpha (magnitude of migrant pulse)
+
+for (i in 1:length(alpha_vals)) {
+    alpha = alpha_vals[i] # vary magnitude of migrant pulse
+    y0 = as.numeric(tail(burnIn,1)) # set initial state variable vector to results from burned       in resident pop
+    y0 = y0[c(2:20)] #remove 'Time' from initial state variable vector
+    ParamRuns <- vector(mode="list", length = length(points))
+  for (j in 1:points) {
+      params <- params2[j,]
+      outLHS <- dede(y = y0, times = Tspan, func = fullPatchModel, parms = c(params, 
+           fixedParams, alpha), rtol = 1e-14)
+      colnames(outLHS)=c("Time", "SL","IV", "IE", "IH", "SA", "IA", "CA","SAm", 
+                         "IAm","CAm","S_Lm","I_Vm","I_Em","I_Hm","DSm","DIm","DCm","M", "MC")
+      ParamRuns[[j]] <- outLHS
+  }
+    LHS.Outputs[[i]] <- ParamRuns
+}
+
+#check one run
+tail(out.LHS.test)
+tail(LHS.Outputs[[1]][[1]])
+```
+
+```{r calculate prevalence across variable parameters}
+PrevResults <- tibble(.rows = length(alpha_vals)*points)
+PrevResults$Alpha <- rep(alpha_vals, each = points)
+
+#calculating final prevalence in adult and larval residents and migrants, and in departed migrants 
+
+#resident larvae
+PrevResults$endPrevRL
+
+for (i in 1:length(alpha_vals)) {
+  for (j in 1:length(LHS.Outputs[[i]])) {
+    endSL <- tail(LHS.Outputs[[i]][[j]], 1)[2]
+    endIV <- tail(LHS.Outputs[[i]][[j]], 1)[3]
+    endIE <- tail(LHS.Outputs[[i]][[j]], 1)[4]
+    endIH <- tail(LHS.Outputs[[i]][[j]], 1)[5]
+    index <- ((i-1)*points)+j #for points = 50, when i = 1 and j = 1, fill eqPrev[1], when i = 2 and j = 13, fill eqPrev[63]
+    PrevResults$endPrevRL[index] <- (endIV + endIE + endIH)/(endSL + endIV + endIE + endIH)
+  }
+}
+
+#migrant larvae
+PrevResults$endPrevML
+
+for (i in 1:length(alpha_vals)) {
+  for (j in 1:length(LHS.Outputs[[i]])) {
+    endSL <- tail(LHS.Outputs[[i]][[j]], 1)[12]
+    endIV <- tail(LHS.Outputs[[i]][[j]], 1)[13]
+    endIE <- tail(LHS.Outputs[[i]][[j]], 1)[14]
+    endIH <- tail(LHS.Outputs[[i]][[j]], 1)[15]
+    index <- ((i-1)*points)+j #for points = 50, when i = 1 and j = 1, fill eqPrev[1], when i = 2 and j = 13, fill eqPrev[63]
+    PrevResults$endPrevML[index] <- (endIV + endIE + endIH)/(endSL + endIV + endIE + endIH)
+  }
+}
+
+#resident adults
+PrevResults$endPrevRA
+
+for (i in 1:length(alpha_vals)) {
+  for (j in 1:length(LHS.Outputs[[i]])) {
+    endSA <- tail(LHS.Outputs[[i]][[j]], 1)[6]
+    endIA <- tail(LHS.Outputs[[i]][[j]], 1)[7]
+    endCA <- tail(LHS.Outputs[[i]][[j]], 1)[8]
+    index <- ((i-1)*points)+j #for points = 50, when i = 1 and j = 1, fill eqPrev[1], when i = 2 and j = 13, fill eqPrev[63]
+    PrevResults$endPrevRA[index] <- (endIA)/(endSA + endIA + endCA)
+  }
+}
+
+#migrant adults
+PrevResults$endPrevMA
+
+for (i in 1:length(alpha_vals)) {
+  for (j in 1:length(LHS.Outputs[[i]])) {
+    endSA <- tail(LHS.Outputs[[i]][[j]], 1)[9]
+    endIA <- tail(LHS.Outputs[[i]][[j]], 1)[10]
+    endCA <- tail(LHS.Outputs[[i]][[j]], 1)[11]
+    index <- ((i-1)*points)+j #for points = 50, when i = 1 and j = 1, fill eqPrev[1], when i = 2 and j = 13, fill eqPrev[63]
+    PrevResults$endPrevMA[index] <- (endIA)/(endSA + endIA + endCA)
+  }
+}
+
+#departed migrant adults
+PrevResults$endPrevD
+
+for (i in 1:length(alpha_vals)) {
+  for (j in 1:length(LHS.Outputs[[i]])) {
+    endSD <- tail(LHS.Outputs[[i]][[j]], 1)[16]
+    endID <- tail(LHS.Outputs[[i]][[j]], 1)[17]
+    endCD <- tail(LHS.Outputs[[i]][[j]], 1)[18]
+    index <- ((i-1)*points)+j #for points = 50, when i = 1 and j = 1, fill eqPrev[1], when i = 2 and j = 13, fill eqPrev[63]
+    PrevResults$endPrevD[index] <- (endID)/(endSD + endID + endCD)
+  }
+}
+```
+
+```{r plotting final prevalence over variable alpha and other parameters}
+PrevResults$Alpha <- as.factor(PrevResults$Alpha)
+
+ggplot(PrevResults, aes(Alpha, endPrevD)) + 
+  geom_boxplot(color = "black", fill = "red") + 
+  scale_y_continuous(expand = c(0,0),limits = c(0, .25)) +
+  theme_bw() +
+  labs(x = "Magnitude of Migrant Pulse (individuals/day)", y = "Final prevalence in cum. departed migrants")
+```
+```{r calculating partial rank correlation coefficients}
+#Partial correlation coefficients to assess affect on final prevalence in departed migrants
+
+#for calculations, I want a wide dataframe with just final prevelances in departed adults by alpha
+DPrev <- PrevResults %>%
+  dplyr::select(Alpha, endPrevD)
+DPrev$ParamSet <- rep(1:points,length(alpha_vals))
+DPrev <- pivot_wider(DPrev, names_from = ParamSet, values_from = endPrevD)
+DPrev <- DPrev %>%
+  dplyr::select(!Alpha)
+
+#NAN results in this matrix are somewhat nonsensical, they occur only when there are 0 migrants, so the prevalence as calculated requires dividing by 0. We'll drop this column to allow for continued calculations 
+
+DPrev <- DPrev %>%
+  slice(-1)
+
+## Calculate PRCCs
+PRCC=rep(NA,nparams)
+PRCC_p=rep(NA,nparams)
+CC=rep(NA,nparams)
+
+for (i in 1:nparams){
+  XX = c(1:nparams)
+  XX=XX[setdiff(1:length(XX),i)]
+  vec <- as.numeric(DPrev[i,])
+  PRCC[i] = pcor.test(vec, params2[,i], params2[,XX], method = "spearman")[1]
+  PRCC_p[i]=pcor.test(vec,params2[,i],params2[,XX],method="spearman")[2]
+  CC[i]=cor(vec, params2[,i])
+  
+  PRCC_p
+}
+
+#plotting
+
+par(mfrow=c(1,2))
+xlabs=c("gamma", "b_i", "theta", "mu_I", "mu_d")
+
+plot(CC,xaxt='n',xlab='')
+axis(1,at=1:nparams,labels=xlabs,las=2)
+abline(h=0,lty=2)
+
+plot(unlist(PRCC),xaxt='n',ylab="PRCC",xlab='')
+axis(1,at=1:nparams,labels=xlabs,las=2)
+abline(h=0,lty=2)
+for(i in 1:nparams){
+  segments(i,0,i,unlist(PRCC[i]))
+}
+points(unlist(PRCC),pch=ifelse(PRCC_p<0.05,19,1))
+legend("bottom",pch=c(19,1),c("Significant","Not significant"),bty='n')
+
+```
+
